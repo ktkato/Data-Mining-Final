@@ -1,0 +1,382 @@
+---
+title: "Final Project - MLB Contracts"
+author: "Kenny Kato"
+eid: "UT EID: kk34522"
+date: "5/8/2020"
+output: pdf_document
+---
+
+# Abstract
+
+An explosion of baseball data in the past two decades has transformed everything from the top of a baseball organization to the bottom, and while much of that information has been deployed in the field to gain in-game competitive advantages, a closely related mission of baseball executives is evaluating players for the sake of accurately paying them.  Using single-season and multiple-season performance data from FanGraphs.com and historical contract information from Cot’s Baseball Contract, I toss the information through a couple predictive models to uncover the relationship between player performance and the ultimate payday that awaits them – though not without limitations, such as missing control information (like injury data) that I believe could sharpen the precision of these models.  Nevertheless, I do find that there exists a seemingly generic quadratic relationship between the principal component analysis-derived performance metrics and the player’s eventual contract average annual value (AAV).  In a somewhat unexpected turn of events, I find that a linear regression model (utilizing a quadratic term) consistently outperforms a random forest regression model for both the single- and multiple-season datasets, suggesting a generally simple path relationship between performance and salary.
+
+```{r include=FALSE}
+library(mosaic)
+library(data.table)
+library(tidyverse)
+library(randomForest)
+library(foreach)
+
+options(scipen = 999)
+
+mlbcontracts1yr <- read.csv("~/University of Texas/Data Mining & Statistical Inference/Final Project/mlbcontracts.csv")
+mlbcontracts3yr <- read.csv("~/University of Texas/Data Mining & Statistical Inference/Final Project/mlbcontracts3yr.csv")
+
+
+# Split up indices, factors, contract info, and framing from main data
+contractinfo <- subset(mlbcontracts1yr, select = c(player,yr,pos,agecontract,aav))
+allstats1yr <- subset(mlbcontracts1yr, select = -c(index,player,pos,agecontract,ageprioryr,contractyrs,guarantee,aav,team,framing,playerid))
+allstats3yr <- subset(mlbcontracts3yr, select = -c(index,player,pos,agecontract,ageprioryr,contractyrs,guarantee,aav,team,framing,playerid))
+
+# Fill in "fld" with 0 (for Jason Giambi 2014, Travis Hafner 2013, Jim Thome 2010, Jim Thome 2011, Hideki Matsui 2010, Jim Thome 2010)
+allstats1yr[is.na(allstats1yr)] <- 0
+
+# Principal Component Analysis (1-Year)
+
+pc_1yr <- prcomp(allstats1yr, rank = 20, scale. = TRUE)  # PCA on 1-year stats
+load1 = pc_1yr$rotation  # Characterizes each component
+scores1 = pc_1yr$x  # Characterizes each player
+
+# Principal Component Analysis (3-Year)
+
+pc_3yr <- prcomp(allstats3yr, rank = 15, scale. = TRUE)  # PCA on 3-year stats
+load3 = pc_3yr$rotation  # Characterizes each component
+scores3 = pc_3yr$x  # Characterizes each player
+```
+
+# Introduction
+
+Over the past two decades, Major League Baseball has experienced a transformation in the way baseball players are analyzed and evaluated.  New ideas have flooded the game, ranging as far afield in their aim as Willie Mays might have once covered centerfield at the Polo Grounds.  Philosophies about how to win, improve teams, keep players healthy, and more have been introduced, reinvented, or even cast into obsolescence in response to a deluge of data.  Teams who used to tally up RBIs as a favorite metric have instead adopted wRC+, while teams who once used wRC+ now simply rely on sufficiently loud clubhouse trash cans and a solid A/V system.  On the field, the spoils of war have increasingly gone to teams that are best able to utilize the wide variety of information now available to them, but data can be quite useful off the field as well.
+
+Among one of the stickier issues that MLB executives and analysts are tasked with is how to value a counterfactual (impossible!): they are trying to pay a player (in this report the player is a free agent) according to their future performance, largely based on prior performance.  The price of a single free agent can have sprawling consequences – on fellow free agents seeking a contract, on future free agents who are deciding whether to sign a contract extension with their current team or test free agency, on young players still having their valuations determined in the salary arbitration process, and so forth.  Free agency is a highly dynamic economy and no team wants to end up being the one that signs Pablo Sandoval for $95 million.
+
+What I am interested in finding, then, is simple: what is the nature of the relationship between salary and prior performance, and to what extent is prior performance capable of predicting salary?  Theoretically, in Major League Baseball’s free agent market – a ruggedly free market – players should be getting paid according to merit.  While factors like individual team and personal player needs preclude us from formulaically tossing numbers into a machine and getting the correct salary spit back out at us, we should be able to estimate player salaries pretty closely simply based on performance given the meritocratic environment and the fact that players’ merits as ballplayers are publicly available.  With the help of principal component analysis and a couple predictive models, I attempt to find something resembling a market price for players based on recent performance, and I add a few notes speculating why any given player might deviate from it.
+
+# Methods
+## Data
+
+Fundamentally, data on the performance of individual players needs to sufficiently describe the true performance of a player to be worthwhile; with this in mind, I highly valued variety in my selection process for whose database to use, i.e. I wanted data capable of capturing the various idiosyncrasies of players.  Fortunately, measuring the performance of a ballplayer is of primary concern to anyone and everyone who watches sports with semi-regularity, so data is presented pretty straightforwardly.  I acquired data for both just the most recent year prior to the new contract, as well as the most recent three years, simply to see how much the model might improve with more established track records.  The dataset I used carried 91 performance metrics, plus a column each for the age of the player during that season (or average age, in the case of the three-season dataset) and the team for which they played.  I opted to use FanGraphs.com for my data source, and because several sources gather various types of baseball information, I think I should briefly explain why I feel that FanGraphs.com, relative to other well-known databases, offers the most accessible, valuable, and richest variety of performance metrics for predicting contract values.
+
+While Baseball Prospectus has high-quality information and is one of the oldest and most respected organizations for analysis using advanced baseball statistics (sabermetrics), including some of their own proprietary metrics, a subscription is required to access higher-level data sorting and metrics.  Baseball Savant, MLB’s repository for the cutting-edge Statcast metrics that collects event-level microdata like “exit velocities” or “launch angles” on individual contact-making swings), might be my choice if I were to pursue this project in twenty years’ time, but their most interesting metrics are currently only a few years old.  Databases like those found on more mainstream websites like MLB.com or ESPN.com largely limit their variables to those most familiar to fans of all stripes – the fanatical and the casual – which are less nuanced and violates my “variety” condition.  FanGraphs.com – which uses Retrosheet.org and Baseball Info Solutions – is free to use and hosts one of the oldest databases for sabermetrics, operating since the mid-2000s.  Not only do they satisfy my variety condition, but their existence straddles the sabermetric revolution – the proliferation of newer and more descriptive statistics in the analysis of ballplayers – which suggests that their data is more likely to represent the information being used by baseball executives to make salary decisions during the time period I’m studying.  Essentially, if FanGraphs.com is unable to adequately describe the performance of a player, then it simply cannot be done at this point in time.
+
+Contract data was collected from Cot’s Baseball Contracts from as early as the 2008-2009 offseason to the most recent 2019-2020 offseason.  In total, there are twelve years’ worth of contract data and I kept the 530 observations of position players (i.e. not pitchers) that were awarded a contract totaling at least $1 million in that timeframe.  (It was originally 532, but two players were dropped – Rafael Furcal and Corey Hart – because they did not play in the majors due to injury the year prior to signing their MLB contracts.)  An explanation of why I selected Cot’s is not necessary, because it hosts the only historical database of contract information that I can find online.  Spotrac is another popular website for information on sports contracts, but their historical databases are behind a paywall.  The FanGraphs data was reduced to simply the 530 players who signed contracts between 2008 and 2020, and merged with the Cot’s contract data, joined by the player.  All in all, my starting datasets were 530 rows by 102 columns.
+
+## Limitations
+
+Unfortunately, in exploring the contributions of prior performance to salary decisions, I don’t get to play with a completely full deck.  One dataset I wish existed publicly was a compilation of individual players’ health histories.  Health is of course a major influence on salary negotiations, one I would like to control for when attempting to isolate the effect of performance; some teams in recent years have even begun to invest in additional research on biomechanics, trying to optimize their ability to prevent, anticipate, manage, and recover from injuries.  Understandably, the knowledge of a player’s true health status is commonly restricted to team personnel, for both personal and competitive reasons, but even the information that becomes public knowledge – like the nature of injuries that diminish playing time, body parts affected, severity of an injury, surgeries required, etc. – seems to exist only in scattered press releases and articles across the web.  For now, we will simply acknowledge the limitation and trust in the ability of statistics that can be proxies for injuries – like games played or plate appearances – to get us close to the mark.
+
+Another limitation to this project is mostly due to a personal lack of prescience, which is my failure to account for which teams sign which players.  I think it is likely that salary amounts are somewhat dependent on whether a low-payroll team like the Tampa Bay Rays or Oakland A’s are paying them or a high-payroll team like the New York Yankees or Los Angeles Dodgers are paying them.  I can imagine both a demand- and supply-side boosting effect on salaries for above-average players: on the team side of a negotiation, a high-payroll team might in theory exercise a greater flexibility to “overpay” for a player they would like to have, while on the player side, an elite player might recognize the scarcity of comparable players available and exact something like a monopoly markup from the buying team.  In light of this, then, we might actually expect to observe salaries nonlinearly boosted upwards as talent rises and becomes scarcer, and I will in fact show this relationship in the next section.
+
+## Approach
+
+Clearly, no one wants to watch me regress a player’s AAV onto 90-something variables and since many of the features of my dataset are largely correlated (sometimes even involved in each other’s calculations), the size of the dataset wouldn’t correspond to greater explanatory power anyway, so my first step in preprocessing the data was to run a principal component analysis (PCA) on the dataset of performance metrics to reduce the dimensions.  The principal components would then effectively become my performance metrics for further analysis.
+
+After reducing my dataset, I split it into training and testing sets (80/20) and tossed my principal components (along with a “player age” variable marking the age of the player going into the first year of the new contract) into two competing models: a random forest regression and a linear regression on the training set, with AAV as my outcome variable, to measure the quality of predictions on the testing set.  The random forest model is meant to address both the potential nonlinearity for elite players that I alluded to above, as well as any other nonlinear factors I may not have considered, since I expect it to make better predictions on a dataset than the linear model.  I used 8 feature samples for each tree in the 1-year set and 5 features in the 3-year set, and in both cases I bootstrapped 500 trees.  I averaged the root-mean-squared error (RMSE) of each regression over 100 iterations of resampling the training and testing sets to compare the performances of each.
+
+# Results
+## Principal Components
+
+Altogether, in the one-year dataset, 15 of the principal components explain about 85% of the variance, while 20 principal components explain about 90%; in the three-year dataset, 11 principal components gets 85% and 15 principal components will get us to 90%.
+
+Several of the principal components do a solid job characterizing baseball player archetypes, many of which are addressed in the conclusion.  The first principal component (PC1), for instance (which explains 25% of the variance in the 1-year set, 28% in the 3-year), appears to be a sort of negative quality index, so I guess you could say that players associated with PC1 are not used to scoring so highly.  PC1 is largely the same in both the 1- and 3-year datasets. Below are the top- and bottom-eight ranked features in the 3-year.
+
+Top:
+
+```{r echo=FALSE}
+# What describes PC1? (Using 3-year dataset, though it's largely the same in the 1-year)
+# Typical MLB job-seeker: weak hitters, primary trade is defense, probably journeymen & utility players
+
+  # Top 8 features
+  head(load3[order(load3[,1], decreasing = TRUE),1],8)
+```
+
+Bottom:
+
+```{r echo=FALSE}
+  # Bottom 8 features
+  head(load3[order(load3[,1]),1],8)
+```
+
+Its high-ranking features are only mildly identified and appear to associate well with what baseball folk might call “journeymen,” the quintessential job-seeker.  They typically sign to short-term deals and so bounce around from team to team, well-acquainted with free agency.  Both “positional” and “def” are defensive skill measures, while “soft_pct_plus” is how above-average the player is at making “soft contact” when hitting (not good).  Its lowest-ranked features are also those that are measures of skill: both wRAA and wRC+ are measures of the amount of runs you contribute to your team above-average (run production being, of course, a fundamentally good thing in baseball).
+
+To verify that the demand for increasing talent increases nonlinearly, I took this shiny new quality index and plotted it against AAV; I also plotted it against a well-known baseball quality index – Wins Above Replacement (WAR) – to confirm that I was correct to describe PC1 as a quality index in its own right.  There is definitely a strong and well-defined relationship between the three variables:
+
+```{r include=FALSE}
+# New data frames
+
+mlb1yr <- cbind(contractinfo, scores1)
+mlb1yr$nameyr <- paste(mlb1yr$player, mlb1yr$yr)
+
+mlb3yr <- cbind(contractinfo, scores3)
+mlb3yr$nameyr <- paste(mlb3yr$player, mlb3yr$yr)
+```
+```{r echo=FALSE, cache=TRUE}
+# Illustrating nonlinearity between talent and money
+
+simplelm <- lm(aav ~ poly(PC1,2), data = mlb1yr)
+quadpred <- predict(simplelm)
+
+p <-
+  ggplot(data = mlb1yr) +
+    geom_point(mapping = aes(x = PC1, y = aav)) +
+    xlab("Principal Component 1") +
+    ylab("Average Annual Value") +
+    geom_line(aes(x = PC1, y = quadpred)) +
+    ggtitle("Figure 1. PC1 and AAV")
+q <-
+  ggplot(data = mlb1yr) +
+    geom_point(mapping = aes(x = PC1, y = mlbcontracts1yr$war)) +
+    xlab("Principal Component 1") +
+    ylab("WAR") +
+    ggtitle("Figure 2. PC1 and WAR")
+  
+gridExtra::grid.arrange(p,q,ncol=2)
+  
+```
+\newpage
+
+## Regressions
+
+```{r include=FALSE, cache=TRUE}
+
+###   Making predictions   ###
+
+N = nrow(mlb1yr)
+
+# split into a training and testing set
+train_frac = 0.8
+N_train = floor(train_frac*N)
+N_test = N - N_train
+
+
+# Create the function that will give us our table
+
+rmse_df <- function(formulalm, formularf, splitnum, p, df) {
+  
+  fitlist <- list()
+  
+  for(i in 1:splitnum) {
+    
+    set.seed(50820)
+    train_ind = sample.int(N, N_train, replace=FALSE) %>% sort
+    mlbtrain = df[train_ind,]
+    mlbtest = df[-train_ind,]
+    
+    # Linear Model!
+    
+    lm1_mlb <- lm(formulalm, data = mlbtrain)
+    yhat_lm1_mlb <- predict(lm1_mlb, mlbtest)
+    
+    # Random Forests!
+    
+    forest1_mlb <- randomForest(formularf, data = mlbtrain, mtry = p, ntree = 500)
+    yhat_forest1_mlb <- predict(forest1_mlb, mlbtest)
+    
+    fitlist[[i]] <- data.frame(rmse_lm = (mean((yhat_lm1_mlb - mlbtest$aav)^2) %>% sqrt),
+                               rmse_rf = (mean((yhat_forest1_mlb - mlbtest$aav)^2) %>% sqrt))
+  }  
+  
+  rbindlist(fitlist, idcol = T)
+}
+```
+
+```{r echo=FALSE, cache=TRUE}
+
+# 1-year
+
+table1yr <- rmse_df(formulalm =
+                   aav ~ agecontract +
+                     poly(PC1,2) + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 +
+                     PC11 + PC12 + PC13 + PC14 + PC15 + PC16 + PC17 + PC18 + PC19 + PC20,
+                 formularf =
+                   aav ~ agecontract + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 +
+                   PC11 + PC12 + PC13 + PC14 + PC15 + PC16 + PC17 + PC18 + PC19 + PC20,
+                 splitnum = 100,
+                 p = 8,
+                 df = mlb1yr)
+
+# 3-year
+
+table3yr <- rmse_df(formulalm =
+                   aav ~ agecontract + poly(PC1,2) + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 +
+                   PC11 + PC12 + PC13 + PC14 + PC15,
+                 formularf =
+                   aav ~ agecontract + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 +
+                   PC11 + PC12 + PC13 + PC14 + PC15,
+                 splitnum = 100,
+                 p = 5,
+                 df = mlb3yr)
+```
+```{r include = TRUE}
+
+# Linear Model (1-Year)
+
+# aav ~ agecontract + poly(PC1,2) + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 +
+#                      PC11 + PC12 + PC13 + PC14 + PC15 + PC16 + PC17 + PC18 + PC19 + PC20
+
+# Random Forest Model (1-Year)
+
+# aav ~ agecontract + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 +
+#                    PC11 + PC12 + PC13 + PC14 + PC15 + PC16 + PC17 + PC18 + PC19 + PC20
+
+```
+
+I use the 20 principal components as variables in the one-year regressions and 15 in the three-year regressions (90% variance explanation for each), as well as a variable for the player’s age going into the first year of the contract. In the linear models, based on the relationship between AAV and PC1 that we saw above, I added the little twist of a quadratic term on the first principal component, which seemed to outperform a linear model without it and should help it compete with the random forest model.  Running the two regressions over the 100 iterations presented a somewhat surprising result: the linear model (with the quadratic term) fairly convincingly outperformed the random forest predictions in terms of averaged RMSE.
+
+### Linear Model RMSE (1-Year):
+
+```{r echo=FALSE}
+# Who wins 1-year?
+mean(table1yr$rmse_lm)  # Winner!
+```
+
+### Random Forest RMSE (1-Year):
+
+```{r echo=FALSE}
+mean(table1yr$rmse_rf)
+```
+
+### Linear Model RMSE (3-Year):
+
+```{r echo=FALSE}
+# Who wins 3-year?
+mean(table3yr$rmse_lm)  # Winner!
+```
+
+### Random Forest RMSE (3-Year):
+
+```{r echo=FALSE}
+mean(table3yr$rmse_rf)
+```
+
+And here, we can see a sample variable importance plot from the random forest model:
+
+```{r echo=FALSE}
+# Sample Variance Importance Plot
+
+set.seed(500)
+train_index = sample.int(N, N_train, replace=FALSE) %>% sort
+train_ex = mlb3yr[train_index,]
+test_ex = mlb3yr[-train_index,]
+forest_ex <- randomForest(aav ~ agecontract + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 +
+                              PC11 + PC12 + PC13 + PC14 + PC15, data = train_ex, mtry = 5, ntree = 500)
+yhat_forest_ex <- predict(forest_ex, test_ex)
+varImpPlot(forest_ex)  # PC1 hugely important, which must be why accounting for its quadratic curvature improved the LM so much
+```
+
+# Conclusion
+
+In addition to PC1, we see that age plays a significant role in player evaluation – no surprise there – and PC2, PC6, PC8, and PC11 tend to remain near the top on repeated iterations.  PC2 seems to represent go-big-or-go-home players, likely to strike out a lot or hit with a lot of power; PC6 appears to be productive hitters that just don’t play often; PC8 players are valued highly for their defensive contributions and appear to be kind of slow – possibly catchers; and I’m not quite sure what to make of PC11, but they seem to have done well in more important game situations.  The most notable loadings of the first fifteen principal components for the 3-year dataset have been included in the appendix.
+
+Admittedly, I expected the random forest model to perform better than the linear regression.  That the random forest model did not outperform the linear regression model suggests to me that at least the basic relationship between performance metrics and salaries is a fairly lazy and predictable path, as we might hope to see, and that laziness allows a lower-variance model like the linear regression outperform a higher-variance model like the random forest.  We saw how important PC1 was to the model in the random forest’s variable importance plot, so I think it’s reasonable to think that accounting for the quadratic relationship with AAV would greatly improve the linear model.
+
+All that said, there was still an RMSE around or in excess of $3-4 million – what drives it?  I’m fairly confident in the idea that health information would significantly impact the RMSE, and perhaps someday I will get my hands on a high-quality baseball player injury dataset and redo this report.  It is also true that baseball executives simply evaluate ballplayers differently, for better or worse, and much depends on individual circumstances; one ballplayer might take a discount to go to a preferred team, and a team might overpay for a player if the player might be “the missing piece” in their pursuit of a championship.  Another thought that occurred to me far too late for the sake of this project is the presence of heteroskedasticity in the model that I frankly failed to really consider.  I am sure there is room to refine these models in a way that could shrink the RMSE but overall, I think we can reasonably say that the “market price” for a given player in free agency, based on their recent performance, can reliably be captured by a PCA-to-linear regression pipeline.
+
+\newpage
+
+# Appendix
+
+Principal Component 1 (3-Year Dataset)
+
+```{r echo=FALSE}
+head(load3[order(load3[,1], decreasing = TRUE),1],8)
+head(load3[order(load3[,1]),1],8)
+```
+
+Principal Component 2 (3-Year Dataset)
+
+```{r echo=FALSE}
+head(load3[order(load3[,2], decreasing = TRUE),2],8)
+head(load3[order(load3[,2]),2],8)
+```
+
+Principal Component 3 (3-Year Dataset)
+
+```{r echo=FALSE}
+head(load3[order(load3[,3], decreasing = TRUE),3],8)
+head(load3[order(load3[,3]),3],8)
+```
+
+Principal Component 4 (3-Year Dataset)
+
+```{r echo=FALSE}
+head(load3[order(load3[,4], decreasing = TRUE),4],8)
+head(load3[order(load3[,4]),4],8)
+```
+
+Principal Component 5 (3-Year Dataset)
+
+```{r echo=FALSE}
+head(load3[order(load3[,5], decreasing = TRUE),5],8)
+head(load3[order(load3[,5]),5],8)
+```
+
+Principal Component 6 (3-Year Dataset)
+
+```{r echo=FALSE}
+head(load3[order(load3[,6], decreasing = TRUE),6],8)
+head(load3[order(load3[,6]),6],8)
+```
+
+Principal Component 7 (3-Year Dataset)
+
+```{r echo=FALSE}
+head(load3[order(load3[,7], decreasing = TRUE),7],8)
+head(load3[order(load3[,7]),7],8)
+```
+
+Principal Component 8 (3-Year Dataset)
+
+```{r echo=FALSE}
+head(load3[order(load3[,8], decreasing = TRUE),8],8)
+head(load3[order(load3[,8]),8],8)
+```
+
+Principal Component 9 (3-Year Dataset)
+
+```{r echo=FALSE}
+head(load3[order(load3[,9], decreasing = TRUE),9],8)
+head(load3[order(load3[,9]),9],8)
+```
+
+Principal Component 10 (3-Year Dataset)
+
+```{r echo=FALSE}
+head(load3[order(load3[,10], decreasing = TRUE),10],8)
+head(load3[order(load3[,10]),10],8)
+```
+
+Principal Component 11 (3-Year Dataset)
+
+```{r echo=FALSE}
+head(load3[order(load3[,11], decreasing = TRUE),11],8)
+head(load3[order(load3[,11]),11],8)
+```
+
+Principal Component 12 (3-Year Dataset)
+
+```{r echo=FALSE}
+head(load3[order(load3[,12], decreasing = TRUE),12],8)
+head(load3[order(load3[,12]),12],8)
+```
+
+Principal Component 13 (3-Year Dataset)
+
+```{r echo=FALSE}
+head(load3[order(load3[,13], decreasing = TRUE),13],8)
+head(load3[order(load3[,13]),13],8)
+```
+
+Principal Component 14 (3-Year Dataset)
+
+```{r echo=FALSE}
+head(load3[order(load3[,14], decreasing = TRUE),14],8)
+head(load3[order(load3[,14]),14],8)
+```
+
+Principal Component 15 (3-Year Dataset)
+
+```{r echo=FALSE}
+head(load3[order(load3[,15], decreasing = TRUE),15],8)
+head(load3[order(load3[,15]),15],8)
+```
